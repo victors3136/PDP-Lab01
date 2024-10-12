@@ -1,15 +1,16 @@
 #include <algorithm>
 #include <cassert>
-#include <mutex>
-#include <iostream>
-#include <variant>
-#include <vector>
-#include <memory>
-#include <set>
 #include <functional>
-#include <thread>
-#include <syncstream>
+#include <iostream>
+#include <mutex>
+#include <memory>
 #include <numeric>
+#include <set>
+#include <string>
+#include <syncstream>
+#include <thread>
+#include <vector>
+
 // 3. Summation with fixed structure of inputs
 //
 // We have to keep the values of some integer variables.
@@ -31,7 +32,7 @@
 //  Two updates involving distinct variables must be able to proceed independently
 //  (without having to wait for the same mutex).
 
-class SensorSystem {
+class VariableSystem {
 private:
     const size_t size;
     std::vector<int> variables;
@@ -46,7 +47,21 @@ private:
     static constexpr int UPDATE_RANGE = 20;
     static constexpr int UPDATE_MEAN_VALUE = 10;
 
-    auto computeDependents() {
+    [[nodiscard]] std::string variablesAsString() const {
+        std::ostringstream oss;
+        oss << "[";
+        for (auto i = 0; i < variables.size(); ++i) {
+            oss << "{" << i << " : " << variables[i] << "}";
+            if (i < variables.size() - 1) {
+                oss << ", ";
+            }
+        }
+        oss << "]";
+
+        return oss.str();
+    }
+
+    std::vector<std::vector<size_t>> computeDependents() {
         std::vector<std::vector<size_t>> inverseDependencies{};
         inverseDependencies.reserve(size);
         for (auto dependentIndex = 0; dependentIndex < size; ++dependentIndex) {
@@ -62,20 +77,20 @@ private:
         return inverseDependencies;
     }
 
-    [[nodiscard]] auto createLocks() const {
+    [[nodiscard]] std::vector<std::unique_ptr<std::mutex>> createLocks() const {
         std::vector<std::unique_ptr<std::mutex>> mutexVector;
         mutexVector.reserve(size);
         for (auto i = 0; i < size; ++i) { mutexVector.emplace_back(std::make_unique<std::mutex>()); }
         return mutexVector;
     }
 
-    [[nodiscard]] auto createVariables() const {
+    [[nodiscard]] std::vector<int> createVariables() const {
         std::vector<int> variableVector;
         variableVector.resize(size, 0);
         return variableVector;
     }
 
-    static auto search(size_t startID, const std::vector<std::vector<size_t>> &searchSpace) {
+    static std::vector<size_t> search(size_t startID, const std::vector<std::vector<size_t>> &searchSpace) {
         std::set<size_t> visited{startID};
         std::vector<size_t> result{startID};
         // Impure function that modifies the 'visited' and 'result' objects
@@ -93,12 +108,12 @@ private:
         return result;
     }
 
-    static auto uniqueSearch(size_t startID, const std::vector<std::vector<size_t>> &searchSpace) {
+    static std::vector<size_t> uniqueSearch(size_t startID, const std::vector<std::vector<size_t>> &searchSpace) {
         std::set<size_t> visited{startID};
         std::vector<size_t> result{startID};
         // Impure function that modifies the 'visited' and 'result' objects
         std::function<void(size_t)> dfs = [&](int var) {
-            for (auto dep: searchSpace[var]) {
+            for (const auto dep: searchSpace[var]) {
                 if (visited.find(dep) == visited.end()) {
                     visited.insert(dep);
                     dfs(dep);
@@ -114,12 +129,12 @@ private:
     // Traverse the dependents tree and gather all direct and indirect dependencies of the variable with said id
     // The return vector is sorted in order to avoid deadlocks
     // Does not need to be synchronised as of now, since the dependency matrix is constant across the program's runtime
-    [[nodiscard]] auto getAllDependents(size_t variableID) const {
+    [[nodiscard]] std::vector<size_t> getAllDependents(size_t variableID) const {
         assert(variableID < size && "Trying to read dependents of a variable that is not part of the system");
         return uniqueSearch(variableID, dependents);
     }
 
-    auto updateVariable(size_t variableId, int delta) {
+    void updateVariable(size_t variableId, int delta) {
         assert(variableId < size && "Trying to update a variable that is not part of the system");
         assert(dependencies[variableId].empty() && "Trying to update a non-primary variable");
         std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Update " << variableId << " by "
@@ -138,14 +153,15 @@ private:
         }
     }
 
-    auto checkConsistency() const {
+    void checkConsistency() const {
         std::vector<std::unique_lock<std::mutex>> lockGuards;
         lockGuards.reserve(variables.size());
-        for (int index = 0; index < size; ++index) {
-            lockGuards.emplace_back(*locks[index]);
+        for (const auto &lock: locks) {
+            lockGuards.emplace_back(*lock);
         }
         std::osyncstream(std::cout) << "[CC] Starting" << std::endl;
         for (int index = 0; index < size; ++index) {
+            if (dependencies[index].empty()) { continue; }
             const auto expectedValue = std::accumulate(dependencies[index].cbegin(),
                                                        dependencies[index].cend(),
                                                        0,
@@ -153,48 +169,34 @@ private:
                                                            return partialSum + variables[valueId];
                                                        });
             const auto actualValue = variables[index];
+
             assert(expectedValue == actualValue && "[CC] Failure");
         }
-        std::osyncstream(std::cout) << "[CC] Success" << std::endl;
+        std::osyncstream(std::cout) << "[CC] Success:\n" << variablesAsString() << std::endl;
     }
 
-public:
-    explicit SensorSystem(const std::vector<std::vector<size_t>> &&deps) : dependencies(deps),
-                                                                           dependents(computeDependents()),
-                                                                           locks(createLocks()),
-                                                                           variables(createVariables()),
-                                                                           size(deps.size()) {
-        assert(size == variables.size() && "Mismatch between variable vector size and system size");
-        assert(size == dependencies.size() && "Mismatch between dependencies vector size and system size");
-        assert(size == dependents.size() && "Mismatch between dependents vector size and system size");
-        assert(size == locks.size() && "Mismatch between locks vector size and system size");
-    }
 
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "cert-msc50-cpp"
 
-    auto startThreads() {
-        static auto baseSensorsCount = std::count_if(dependencies.cbegin(),
+    void startThreads() {
+        const auto baseVariableCount = std::count_if(dependencies.cbegin(),
                                                      dependencies.cend(),
                                                      [](const auto &dependencyVector) { return dependencyVector.empty(); });
-        std::osyncstream(std::cout) << "[Main] Starting worker threads" << std::endl;
-        threads.reserve(baseSensorsCount + 1);
-        for (int index = 0; index < baseSensorsCount; ++index) {
-            threads.emplace_back([this]() {
-                std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Start" << std::endl;
-                std::srand(std::chrono::system_clock::now().time_since_epoch().count());
-                int i = 0;
-                while (++i < WORKER_ITER_COUNT) {
-                    const auto variableId = std::rand() % size;
-                    if (dependencies[variableId].empty()) {
-                        updateVariable(variableId, std::rand() % UPDATE_RANGE - UPDATE_MEAN_VALUE);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(std::rand() % WORKER_MAX_SLEEP_TIME_MS));
-                    }
+        const auto workerThreadBody = [this]() {
+            std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Start" << std::endl;
+            std::srand(std::chrono::system_clock::now().time_since_epoch().count());
+            int i = 0;
+            while (++i < WORKER_ITER_COUNT) {
+                const auto variableId = std::rand() % size;
+                if (dependencies[variableId].empty()) {
+                    updateVariable(variableId, std::rand() % UPDATE_RANGE - UPDATE_MEAN_VALUE);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(std::rand() % WORKER_MAX_SLEEP_TIME_MS));
                 }
-                std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] End" << std::endl;
-            });
-        }
-        threads.emplace_back(/*Consistency checker*/
+            }
+            std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] End" << std::endl;
+        };
+        const auto ccThreadBody =
                 [this]() {
                     std::srand(std::chrono::system_clock::now().time_since_epoch().count());
                     int i = 0;
@@ -202,12 +204,18 @@ public:
                         checkConsistency();
                         std::this_thread::sleep_for(std::chrono::milliseconds(std::rand() % CC_MAX_SLEEP_TIME_MS));
                     }
-                });
+                };
+        std::osyncstream(std::cout) << "[Main] Starting worker threads" << std::endl;
+        threads.reserve(baseVariableCount + 1);
+        for (int index = 0; index < baseVariableCount; ++index) {
+            threads.emplace_back(workerThreadBody);
+        }
+        threads.emplace_back(ccThreadBody);
     }
 
 #pragma clang diagnostic pop
 
-    auto gatherThreads() {
+    void gatherThreads() {
         std::osyncstream(std::cout) << "[Main] waiting for workers" << std::endl;
         for (auto &thread: threads) {
             if (thread.joinable()) { thread.join(); }
@@ -216,23 +224,34 @@ public:
         checkConsistency();
     }
 
+public:
+    explicit VariableSystem(const std::vector<std::vector<size_t>> &&deps) : dependencies(deps),
+                                                                             dependents(computeDependents()),
+                                                                             locks(createLocks()),
+                                                                             variables(createVariables()),
+                                                                             size(deps.size()) {
+        assert(size == variables.size() && "Mismatch between variable vector size and system size");
+        assert(size == dependencies.size() && "Mismatch between dependencies vector size and system size");
+        assert(size == dependents.size() && "Mismatch between dependents vector size and system size");
+        assert(size == locks.size() && "Mismatch between locks vector size and system size");
+        startThreads();
+        gatherThreads();
+    }
 };
 
 int main() {
-    SensorSystem system({
-                                {}          /*  0 */,
-                                {}          /*  1 */,
-                                {}          /*  2 */,
-                                {}          /*  3 */,
-                                {}          /*  4 */,
-                                {1, 2}      /*  5 */,
-                                {4, 3, 0}   /*  6 */,
-                                {}          /*  7 */,
-                                {7, 6}      /*  8 */,
-                                {2}         /*  9 */,
-                                {8, 9, 5}   /* 10 */
-                        });
-    system.startThreads();
-    system.gatherThreads();
+    VariableSystem system({
+                                  {}          /*  0 */,
+                                  {}          /*  1 */,
+                                  {}          /*  2 */,
+                                  {}          /*  3 */,
+                                  {2, 1}      /*  4 */,
+                                  {1, 2}      /*  5 */,
+                                  {4, 3, 0}   /*  6 */,
+                                  {}          /*  7 */,
+                                  {7, 6}      /*  8 */,
+                                  {2}         /*  9 */,
+                                  {8, 9, 5}   /* 10 */
+                          });
     return 0;
 }
