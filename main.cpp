@@ -1,14 +1,14 @@
 #include <algorithm>
 #include <cassert>
-#include <iostream>
-#include <latch>
-#include <memory>
 #include <mutex>
-#include <random>
-#include <thread>
-#include <vector>
+#include <iostream>
 #include <variant>
-
+#include <vector>
+#include <memory>
+#include <set>
+#include <functional>
+#include <thread>
+#include <syncstream>
 // 3. Summation with fixed structure of inputs
 //
 // We have to keep the values of some integer variables.
@@ -18,7 +18,7 @@
 // The inputs may be primary or secondary variables.
 // However, we assume that the relations do not form cycles.
 //
-// At runtime, we getValue notifications of value changes for the primary variable.
+// At runtime, we get notifications of value changes for the primary variable.
 // Processing a notification must atomically update the primary variable,
 // as well as any secondary variable depending, directly or indirectly, on it.
 // The updating shall not re-compute the sums;
@@ -29,228 +29,132 @@
 //
 //  Two updates involving distinct variables must be able to proceed independently
 //  (without having to wait for the same mutex).
-class Variable;
 
-using VariableVector = std::vector<std::shared_ptr<Variable>>;
-
-class Variable {
+class SensorSystem {
 private:
-    mutable std::mutex guard{};
-    std::variant<int, VariableVector> input;
-
-    auto value() const -> int {
-        return std::get<int>(input);
-    }
-
-    auto sum() const -> int {
-        static constexpr auto sum =
-                [](auto sum, const auto &variable) -> int {
-                    return sum + variable->getValue();
-                };
-        const auto &inputs = std::get<VariableVector>(input);
-
-        std::vector<std::unique_lock<std::mutex>> locks;
-        locks.reserve(inputs.size());
-        for (const auto &variable: inputs) {
-            locks.emplace_back(variable->guard);
-        }
-        return std::accumulate(inputs.begin(), inputs.end(), 0, sum);
-    }
-
-public:
-    Variable() : input(0) {}
-
-    Variable(const Variable &other) {
-        std::lock_guard<std::mutex> lock(other.guard);
-        input = other.input;
-    }
-
-    Variable(Variable &&other) noexcept {
-        std::lock_guard<std::mutex> lock(other.guard);
-        input = std::move(other.input);
-    }
-
-    Variable &operator=(const Variable &other) {
-        if (this != &other) {
-            std::lock_guard<std::mutex> lockThis(guard);
-            std::lock_guard<std::mutex> lockOther(other.guard);
-            input = other.input;
-        }
-        return *this;
-    }
-
-
-    Variable &operator=(Variable &&other) noexcept {
-        if (this != &other) {
-            std::lock_guard<std::mutex> lockThis(guard);
-            std::lock_guard<std::mutex> lockOther(other.guard);
-            input = std::move(other.input);
-        }
-        return *this;
-    }
-
-    // Construct a Variable from an int
-    explicit Variable(int value = 0) : input(value) {}
-
-    // Construct a Variable from a vector of other Variables
-    explicit Variable(const VariableVector &values) : input(values) {}
-
-    // Check if the Variable is a primitive
-    inline auto primitive() const -> bool {
-        return std::holds_alternative<int>(input);
-    }
-
-    // Get the value of a variable. This can happen twofold:
-    //  - The input is just an int, in that case just read it
-    //  - The input is a vec of other Variables. In this case, lock all variables and read their values,
-    //  before summing them
-    inline auto getValue() const -> int {
-        return primitive()
-               ? value()
-               : sum();
-    }
-
-    // Method for setting the input to a certain value,
-    // which should assume that the input is an int,
-    // not a vector
-    auto setValue(int newValue) -> void {
-        std::lock_guard<std::mutex> lock(guard);
-        assert(primitive() && "Value should only be set for primitive Variables");
-        input = newValue;
-    }
-
-    inline std::mutex &getLock() const noexcept {
-        return guard;
-    }
-};
-
-class Solution {
-private:
-    static constexpr size_t Count = 10;
-
-    Solution() {
-        variables.reserve(Count);
-        threads.reserve(Count);
-    }
-
-    std::vector<Variable> variables;
+    const size_t size;
+    std::vector<int> variables;
+    const std::vector<std::vector<int>> dependencies;
+    const std::vector<std::vector<int>> dependents;
+    std::vector<std::unique_ptr<std::mutex>> locks;
     std::vector<std::thread> threads;
-public:
-    static auto &Instantiate() {
-        static Solution instance{};
-        return instance;
-    }
 
-    // Create an array of Count simple variables and some complex ones
-    auto setup() -> void {
-        for (int num = 0; num < Count / 2; ++num) {
-            variables.emplace_back(num);
-        }
-        for (int num = Count / 2; num < Count; ++num) {
-            VariableVector inputs = {
-                    std::make_shared<Variable>(variables[num - Count / 2]),
-                    std::make_shared<Variable>(variables[(num + 1) - Count / 2])
-            };
-            variables.emplace_back(inputs);
-        }
-    }
-
-    // Spawn Count threads which all tick one of the simple variables
-    // and 1 thread that does consistency checks every once in a while
-    auto run() -> void {
-        std::latch startLine{Count + 1};
-        std::latch finishLine{Count + 1};
-        for (size_t currentId = 0; currentId < Count; ++currentId) {
-            threads.emplace_back([this, currentId, &startLine, &finishLine]() -> void {
-                startLine.count_down();
-                std::cout << "Thread " << currentId << " started\n";
-                for (auto _ = 0; _ < Solution::Count * 16; ++_) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    tick();
+    auto computeDependents() {
+        std::vector<std::vector<int>> inverseDependencies{};
+        inverseDependencies.reserve(size);
+        for (auto dependentIndex = 0; dependentIndex < size; ++dependentIndex) {
+            inverseDependencies.emplace_back();
+            for (auto dependencyIndex = 0; dependencyIndex < size; ++dependencyIndex) {
+                if (std::find(dependencies[dependencyIndex].begin(),
+                              dependencies[dependencyIndex].end(),
+                              dependentIndex) != dependencies[dependencyIndex].cend()) {
+                    inverseDependencies[dependentIndex].emplace_back(dependencyIndex);
                 }
-                std::cout << "Thread " << currentId << " ended\n";
-                finishLine.count_down();
-            });
-        }
-        // Consistency check
-        threads.emplace_back([this, &startLine, &finishLine]() {
-            startLine.count_down();
-            std::cout << "Consistency check thread started\n";
-            for (auto _ = 0; _ < Solution::Count; ++_) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                checkConsistency();
             }
-            std::cout << "Consistency check thread is done\n";
-            finishLine.count_down();
-        });
-        assert(threads.size() == Count + 1);
+        }
+        return inverseDependencies;
     }
 
-    // Gather all the threads and do any sort of cleanup necessary
-    auto cleanup() -> void {
+    auto createLocks() {
+        std::vector<std::unique_ptr<std::mutex>> lox;
+        lox.reserve(dependencies.size());
+        for (auto i = 0; i < dependencies.size(); ++i) { lox.emplace_back(std::make_unique<std::mutex>()); }
+        return lox;
+    }
+
+    static auto search(int startID, const std::vector<std::vector<int>> &searchSpace) {
+        std::set<int> visited{startID};
+        std::vector<int> result{startID};
+        // Impure function that modifies the 'visited' and 'result' objects
+        std::function<void(int)> dfs = [&](int var) {
+            for (int dep: searchSpace[var]) {
+                if (visited.find(dep) == visited.end()) {
+                    visited.insert(dep);
+                    dfs(dep);
+                    result.push_back(dep);
+                }
+            }
+        };
+        dfs(startID);
+        std::sort(result.begin(), result.end());
+        return result;
+    }
+
+public:
+    explicit SensorSystem(const std::vector<std::vector<int>> &&deps) : dependencies(deps),
+                                                                        dependents(computeDependents()),
+                                                                        locks(createLocks()),
+                                                                        size(deps.size()) {
+//        std::cout << "Size              " << size << std::endl;
+//        std::cout << "Dependencies Size " << dependencies.size() << std::endl;
+//        std::cout << "Dependents Size   " << dependents.size() << std::endl;
+//        std::cout << "Locks Size        " << locks.size() << std::endl;
+        assert(size == dependencies.size());
+        assert(size == dependents.size());
+        assert(size == locks.size());
+        variables.resize(size, 0);
+    }
+
+    // Traverse the dependency tree and gather all direct and indirect dependencies of the variable with said id
+    // The return vector is sorted in order to avoid deadlocks
+    // Does not need to be synchronised as of now, since the dependency matrix is constant across the program's runtime
+    auto getAllDependencies(int variableID) {
+        assert(variableID < size);
+        return search(variableID, dependencies);
+    }
+
+    // Traverse the dependents tree and gather all direct and indirect dependencies of the variable with said id
+    // The return vector is sorted in order to avoid deadlocks
+    // Does not need to be synchronised as of now, since the dependency matrix is constant across the program's runtime
+    auto getAllDependents(int variableID) {
+        assert(variableID < size);
+        return search(variableID, dependents);
+    }
+
+    // Now we need a function that spawns threads. There should be about as many threads as input variables
+    // (variables with no dependencies)
+    // The thread should execute a function that should be a member variable of the class
+    auto spawnThreads() {
+        static auto baseSensorsCount = std::count_if(dependencies.cbegin(),
+                                                     dependencies.cend(),
+                                                     [](const auto &dependencyVector) { return dependencyVector.empty(); });
+        threads.reserve(baseSensorsCount + 1);
+        for (int index = 0; index < baseSensorsCount; ++index) {
+            threads.emplace_back([index]() {
+                std::srand(index);
+                const auto sleepTime = std::rand() % 10; // NOLINT(*-msc50-cpp)
+                std::this_thread::sleep_for(std::chrono::seconds(sleepTime));
+                std::osyncstream(std::cout) << "Thread " << std::this_thread::get_id() << " slept for " << sleepTime
+                                            << " seconds" << std::endl;
+            } /* Run updates on a base sensor*/);
+        }
+        threads.emplace_back([]() {}/*Consistency checker*/);
+    }
+
+    auto gatherThreads() {
         for (auto &thread: threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
+            if (thread.joinable()) { thread.join(); }
         }
-    }
-
-
-    // Check some condition on the variables --> e.g. the sum of the primitives is constant, and some more
-    auto checkConsistency() -> void {
-        static const auto start = std::chrono::system_clock::now();
-        const auto now = std::chrono::system_clock::now();
-        std::cout << "Checking consistency -- " << (now - start).count() / 1000000 << " seconds elapsed\n";
-        int totalSum = 0;
-        std::vector<std::unique_lock<std::mutex>> locks;
-
-        std::vector<Variable *> variablePointers;
-
-        for (auto &var: variables) {
-            variablePointers.push_back(&var);
-        }
-
-        std::sort(variablePointers.begin(), variablePointers.end());
-        // if we get all the locks here, we'll lock ourselves out from reading the actual values, no?
-        for (auto *varPtr: variablePointers) {
-            locks.emplace_back(varPtr->getLock());
-        }
-
-        for (const auto &var: variables) {
-            totalSum += var.getValue();
-        }
-
-        assert(totalSum == 0 && "The total sum of primitives should remain 0!");
-    }
-
-    // Update some of the primitives while also keeping consistency
-    auto tick() -> void {
-        static std::random_device rd;
-        static std::mt19937 gen(rd());
-        static std::uniform_int_distribution<> dist(0, Count / 2 - 1);
-
-        std::cout << "Tick tack\n";
-        int index1 = dist(gen);
-        int index2 = dist(gen);
-        if (index1 == index2) return;
-        int delta = dist(gen);
-        Variable &var1 = variables[index1];
-        Variable &var2 = variables[index2];
-
-        std::unique_lock<std::mutex> lock1(var1.getLock(), std::defer_lock);
-        std::unique_lock<std::mutex> lock2(var2.getLock(), std::defer_lock);
-        std::lock(lock1, lock2);
-
-        var1.setValue(var1.getValue() - delta);
-        var2.setValue(var2.getValue() + delta);
     }
 
 };
 
 int main() {
-    auto &instance = Solution::Instantiate();
-    instance.setup();
-    instance.run();
-    instance.cleanup();
+    std::vector<std::vector<int>> dependencies = {
+            {},
+            {},
+            {},
+            {},
+            {},
+            {1, 2},
+            {4, 3, 0},
+            {},
+            {7, 6},
+            {2},
+            {8, 9, 5}
+    };
+    SensorSystem system(std::move(dependencies));
+    system.spawnThreads();
+    system.gatherThreads();
     return 0;
 }
