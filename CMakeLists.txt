@@ -3,4 +3,4 @@ project(Lab01_NonCooperativeMultithreading)
 
 set(CMAKE_CXX_STANDARD 26)
 
-add_executable(Lab01_NonCooperativeMultithreading main.cpp)
+add_executable(Lab01_NonCooperativeMultithreading main.cpp VariableSystem.cpp)
