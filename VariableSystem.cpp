@@ -15,16 +15,20 @@
 #include <string>
 #include <syncstream>
 #include <thread>
-
-auto VariableSystem::random() -> int {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<int> dist(0, INT_MAX);
-    return dist(gen);
+/*
+    Paste into result to see where threads do *NOT* overlap
+    .*Thread ([0-9])+.*(\n.*Thread \1.*)
+ */
+/* static */ auto VariableSystem::random() -> int {
+    static std::random_device device;
+    static std::mt19937 generator(device());
+    static std::uniform_int_distribution<int> distribution(0, INT_MAX);
+    return distribution(generator);
 }
 
-auto
-VariableSystem::search(const size_t startID, const std::vector<std::vector<size_t>> &searchSpace) -> std::vector<size_t> {
+/* static */ auto
+VariableSystem::search(const size_t startID,
+                       const std::vector<std::vector<size_t>> &searchSpace) -> std::vector<size_t> {
     std::set<size_t> visited{startID};
     std::vector<size_t> result{startID};
     std::stack<size_t> stack;
@@ -54,6 +58,7 @@ VariableSystem::VariableSystem(const std::vector<std::vector<size_t>> &&deps)
     assert(size == dependencies.size() && "Mismatch between dependencies vector size and system size");
     assert(size == dependents.size() && "Mismatch between dependents vector size and system size");
     assert(size == locks.size() && "Mismatch between locks vector size and system size");
+    std::srand(std::chrono::system_clock::now().time_since_epoch().count());
     startThreads();
     gatherThreads();
 }
@@ -120,8 +125,10 @@ void VariableSystem::updateVariable(size_t variableId, int delta) { // NOLINT(*-
     }
     for (const auto id: search(variableId, dependents)) {
         variables[id] += delta;
-        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Update " << id << " by "
+        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Update #" << id << " by "
                                     << delta << '\n';
+        // force a yield
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -160,14 +167,14 @@ void VariableSystem::startThreads() {
                                     << "] About to take a nap\n";
         std::this_thread::sleep_for(
                 std::chrono::milliseconds(random() % WORKER_MAX_SLEEP_TIME_MS) +
-                std::chrono::milliseconds(WORKER_THREAD_MIN_INITIAL_SLEEP));
+                std::chrono::milliseconds(WORKER_THREAD_MIN_INITIAL_SLEEP_MS));
         for (auto i = 0; i < WORKER_ITER_COUNT; ++i) {
             const auto variableId = random() % size;
             if (!dependencies[variableId].empty()) {
                 --i /*stall 1 iteration*/;
                 continue;
             }
-            const auto delta = random() % UPDATE_RANGE - UPDATE_MEAN_VALUE;
+            const auto delta = random() % UPDATE_VALUE_SPREAD - UPDATE_VALUE_MEAN;
             if (!delta) {
                 --i /*stall 1 iteration*/;
                 continue;
