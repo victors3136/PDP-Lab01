@@ -58,6 +58,10 @@ VariableSystem::VariableSystem(const std::vector<std::vector<size_t>> &&deps)
     assert(size == dependencies.size() && "Mismatch between dependencies vector size and system size");
     assert(size == dependents.size() && "Mismatch between dependents vector size and system size");
     assert(size == locks.size() && "Mismatch between locks vector size and system size");
+    std::cout << "THREAD COUNT = " << THREAD_COUNT << '\n';
+    std::cout << "WORKER MAX SLEEP TIME MS = " << WORKER_MAX_SLEEP_TIME_MS << '\n';
+    std::cout << "CC MAX SLEEP TIME MS = " << CC_MAX_SLEEP_TIME_MS << '\n';
+    std::cout.flush();
     std::srand(std::chrono::system_clock::now().time_since_epoch().count());
     startThreads();
     gatherThreads();
@@ -125,8 +129,8 @@ void VariableSystem::updateVariable(size_t variableId, int delta) { // NOLINT(*-
     }
     for (const auto id: search(variableId, dependents)) {
         variables[id] += delta;
-        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Update #" << id << " by "
-                                    << delta << '\n';
+//        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] Update #" << id << " by "
+//                                    << delta << '\n';
         // force a yield
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -138,7 +142,7 @@ void VariableSystem::checkConsistency() const {
     for (const auto &lock: locks) {
         lockGuards.emplace_back(*lock);
     }
-    std::osyncstream(std::cout) << "[CC] Starting\n";
+//    std::osyncstream(std::cout) << "[CC] Starting\n";
     for (int index = 0; index < size; ++index) {
         if (dependencies[index].empty()) { continue; }
         const auto expectedValue = std::accumulate(dependencies[index].cbegin(),
@@ -149,13 +153,13 @@ void VariableSystem::checkConsistency() const {
                                                    });
         const auto actualValue = variables[index];
         if (expectedValue != actualValue) {
-            std::osyncstream(std::cout) << "[CC] Failure when checking consistency for variable " << index << ":\n"
-                                        << "Expected: " << expectedValue << " but got " << actualValue << '\n'
-                                        << variablesAsString() << '\n';
+//            std::osyncstream(std::cout) << "[CC] Failure when checking consistency for variable " << index << ":\n"
+//                                        << "Expected: " << expectedValue << " but got " << actualValue << '\n'
+//                                        << variablesAsString() << '\n';
             assert(false);
         }
     }
-    std::osyncstream(std::cout) << "[CC] Success:\n" << variablesAsString() << '\n';
+//    std::osyncstream(std::cout) << "[CC] Success:\n" << variablesAsString() << '\n';
 }
 
 void VariableSystem::startThreads() {
@@ -163,8 +167,8 @@ void VariableSystem::startThreads() {
                                                  dependencies.cend(),
                                                  [](const auto &dependencyVector) { return dependencyVector.empty(); });
     const auto workerThreadBody = [this]() {
-        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id()
-                                    << "] About to take a nap\n";
+//        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id()
+//                                    << "] About to take a nap\n";
         std::this_thread::sleep_for(
                 std::chrono::milliseconds(random() % WORKER_MAX_SLEEP_TIME_MS) +
                 std::chrono::milliseconds(WORKER_THREAD_MIN_INITIAL_SLEEP_MS));
@@ -182,31 +186,31 @@ void VariableSystem::startThreads() {
             updateVariable(variableId, delta);
             std::this_thread::sleep_for(std::chrono::milliseconds(random() % WORKER_MAX_SLEEP_TIME_MS));
         }
-        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] End\n";
+//        std::osyncstream(std::cout) << "[Thread " << std::this_thread::get_id() << "] End\n";
     };
     const auto ccThreadBody = [this]() {
-        std::osyncstream(std::cout) << "[CC Thread " << std::this_thread::get_id() << "] About to take a nap\n";
+//        std::osyncstream(std::cout) << "[CC Thread " << std::this_thread::get_id() << "] About to take a nap\n";
         for (auto i = 0; i < CC_ITER_COUNT; ++i) {
             checkConsistency();
             std::this_thread::sleep_for(std::chrono::milliseconds(random() % CC_MAX_SLEEP_TIME_MS));
         }
-        std::osyncstream(std::cout) << "[CC Thread " << std::this_thread::get_id() << "] Ended\n";
+//        std::osyncstream(std::cout) << "[CC Thread " << std::this_thread::get_id() << "] Ended\n";
     };
-    std::osyncstream(std::cout) << "[Main] Starting worker threads\n";
-    threads.reserve(baseVariableCount + 1);
-    for (int index = 0; index < baseVariableCount; ++index) {
+//    std::osyncstream(std::cout) << "[Main] Starting worker threads\n";
+    threads.reserve(THREAD_COUNT + 1);
+    for (int index = 0; index < THREAD_COUNT; ++index) {
         threads.emplace_back(workerThreadBody);
     }
     threads.emplace_back(ccThreadBody);
 }
 
 void VariableSystem::gatherThreads() {
-    std::osyncstream(std::cout) << "[Main] waiting for workers\n";
+//    std::osyncstream(std::cout) << "[Main] waiting for workers\n";
     for (auto &thread: threads) {
         if (thread.joinable()) {
             thread.join();
         }
     }
-    std::osyncstream(std::cout) << "[Main] gathered threads\n";
+//    std::osyncstream(std::cout) << "[Main] gathered threads\n";
     checkConsistency();
 }

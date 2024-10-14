@@ -1,5 +1,8 @@
 
 #include "VariableSystem.hpp"
+
+#include <chrono>
+#include <iostream>
 // 3. Summation with fixed structure of inputs
 //
 // We have to keep the values of some integer variables.
@@ -25,6 +28,7 @@
 #pragma ide diagnostic ignored "cppcoreguidelines-avoid-magic-numbers"
 
 auto main() -> int {
+    const auto start = std::chrono::system_clock::now();
     VariableSystem system({
                                   {}                /*  0 */,
                                   {}                /*  1 */,
@@ -41,6 +45,9 @@ auto main() -> int {
                                   {8,  9,  2, 2}          /*  12 */,
                                   {10, 11, 7}            /*  13 */,
                           });
+    const auto end = std::chrono::system_clock::now();
+    std::cout << "TOTAL EXECUTION TIME = " << std::chrono::duration_cast<std::chrono::seconds>(end - start)
+              << " seconds\n";
     return 0;
 }
 

@@ -20,13 +20,14 @@ private:
     std::vector<std::unique_ptr<std::mutex>> locks;
     std::vector<std::thread> threads;
 
-    static constexpr int WORKER_ITER_COUNT = 100;
-    static constexpr int CC_ITER_COUNT = 40;
+    static constexpr int WORKER_ITER_COUNT = 50;
+    static constexpr int CC_ITER_COUNT = 20;
     static constexpr int WORKER_MAX_SLEEP_TIME_MS = 10;
     static constexpr int WORKER_THREAD_MIN_INITIAL_SLEEP_MS = 100;
     static constexpr int CC_MAX_SLEEP_TIME_MS = 50;
     static constexpr int UPDATE_VALUE_SPREAD = 20;
     static constexpr int UPDATE_VALUE_MEAN = 10;
+    static constexpr int THREAD_COUNT = 7;
 
     [[nodiscard]] static auto random() -> int;
 
